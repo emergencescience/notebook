@@ -1,0 +1,18 @@
+[project]
+name = "notebook"
+version = "0.1.0"
+description = "AI-native research notebook — a document-first workspace for academic writing with inline verification and cross-project intelligence"
+requires-python = ">=3.11"
+dependencies = [
+    "sympy>=1.12",
+    "antlr4-python3-runtime>=4.11; python_version >= '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.3",
+]
+
+[project.scripts]
+notebook-verify = "notebook.cross_ref:main"
