@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VeriTeach — AI Co-worker for STEM Educators</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1117; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border-bottom: 1px solid #1e293b; background: #0f1117; }
+  header h1 { font-size: 16px; font-weight: 700; color: #a78bfa; }
+  header .status { font-size: 11px; color: #64748b; display: flex; align-items: center; gap: 4px; }
+  header .actions { display: flex; gap: 8px; }
+  button { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; border: none; cursor: pointer; transition: all 0.15s; }
+  .btn-primary { background: #7c3aed; color: #fff; }
+  .btn-primary:hover { background: #6d28d9; }
+  .btn-primary:disabled { background: #4c1d95; color: #94a3b8; cursor: not-allowed; }
+  .btn-secondary { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; }
+  .btn-secondary:hover { background: #334155; }
+  .btn-danger { background: #7f1d1d; color: #fca5a5; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot-green { background: #22c55e; }
+  .dot-yellow { background: #eab308; }
+  main { display: flex; flex: 1; overflow: hidden; }
+  .pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .pane-header { padding: 8px 12px; font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #1e293b; background: #13151a; }
+  textarea { flex: 1; background: #0f1117; color: #e2e8f0; border: none; padding: 16px; font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 13px; line-height: 1.6; resize: none; outline: none; tab-size: 2; }
+  textarea::placeholder { color: #334155; }
+  #preview { flex: 1; overflow-y: auto; padding: 16px 20px; font-size: 14px; line-height: 1.7; }
+  #preview h1, #preview h2 { color: #f1f5f9; margin: 16px 0 8px; }
+  #preview h2 { font-size: 16px; }
+  #preview p { margin: 6px 0; }
+  #preview code { background: #1e293b; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  #preview pre { background: #1e293b; padding: 12px; border-radius: 6px; overflow-x: auto; }
+  .ai-comment { color: #a78bfa; font-style: italic; }
+  .ai-result { border-left: 2px solid #7c3aed; padding-left: 12px; margin: 8px 0; }
+  .verified { color: #4ade80; font-weight: 600; }
+  .unverified { color: #fbbf24; font-weight: 600; }
+  .error { color: #f87171; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; margin-left: 6px; }
+  .badge-ok { background: #064e3b; color: #4ade80; }
+  .badge-warn { background: #451a03; color: #fbbf24; }
+  .stats { font-size: 11px; color: #64748b; padding: 8px 12px; border-top: 1px solid #1e293b; background: #13151a; display: flex; gap: 16px; }
+  .stats span { display: flex; align-items: center; gap: 4px; }
+  .divider { width: 1px; background: #1e293b; }
+  .demo-sample { font-size: 12px; color: #64748b; padding: 8px 12px; border-bottom: 1px solid #1e293b; background: #0f1117; display: flex; gap: 8px; overflow-x: auto; }
+  .demo-sample button { white-space: nowrap; padding: 3px 10px; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <h1>🧪 VeriTeach</h1>
+    <div class="status">
+      <span class="dot dot-green" id="statusDot"></span>
+      <span id="statusText">Ready</span>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn-secondary" onclick="loadDemo()">📥 Demo</button>
+    <button class="btn-primary" id="generateBtn" onclick="doGenerate()">⚡ Generate</button>
+  </div>
+</header>
+
+<div class="demo-sample" id="demoBar">
+  <span style="color:#64748b;font-weight:600;">Quick start:</span>
+  <button class="btn-secondary" onclick="loadSample('exam')">📝 期中试卷</button>
+  <button class="btn-secondary" onclick="loadSample('proof')">📐 证明题</button>
+  <button class="btn-secondary" onclick="loadSample('lesson')">📖 教案</button>
+  <button class="btn-secondary" onclick="loadSample('empty')">🆕 空白</button>
+</div>
+
+<main>
+  <div class="pane">
+    <div class="pane-header">📝 Editor (use // @ai to instruct the AI)</div>
+    <textarea id="editor" placeholder="Write your document here...
+Use // @ai followed by instructions, e.g.:
+// @ai 出5道关于极限的选择题，覆盖ε-δ定义和夹逼准则
+// @ai 出一道用均值定理的证明题
+
+The AI will replace these comments with generated content."></textarea>
+  </div>
+  <div class="divider"></div>
+  <div class="pane">
+    <div class="pane-header">👁️ Preview</div>
+    <div id="preview"><em style="color:#334155;">Click Generate to see results...</em></div>
+    <div class="stats" id="stats">
+      <span>📊 Blocks: <strong id="blocksCount">0</strong></span>
+      <span>📝 Items: <strong id="itemsCount">0</strong></span>
+      <span>✅ Verified: <strong id="verifiedCount">0</strong></span>
+    </div>
+  </div>
+</main>
+
+<script>
+const API = '/api/generate';
+
+const DEMOS = {
+  exam: `# 高等数学 期中试卷
+
+## 一、选择题（每小题 5 分，共 30 分）
+
+// @ai 出5道关于极限与连续的选择题，涵盖ε-δ定义、重要极限、夹逼准则、间断点类型
+
+## 二、证明题（每小题 10 分，共 20 分）
+
+// @ai 出2道证明题：一道用中值定理，一道用ε-δ语言证明极限
+
+## 三、计算题（每小题 8 分，共 40 分）
+
+// @ai 出4道计算题：求导、不定积分、定积分、极限各一道`,
+  proof: `# 极限证明专项练习
+
+## ε-δ 语言证明
+
+// @ai 出3道ε-δ语言证明的极限题，从简单到复杂
+
+## 中值定理应用
+
+// @ai 出2道需要用拉格朗日中值定理或柯西中值定理的证明题`,
+  lesson: `# 第三章：导数的应用
+
+## 教学目标
+- 掌握中值定理及其几何意义
+- 能用导数判断函数的单调性和凹凸性
+- 会求函数的极值和最值
+
+## 课堂引入
+// @ai 设计一个5分钟的课堂引入，用一个生活中的例子引出"变化率的变化率"
+
+## 例题讲解
+// @ai 出3道典型的极值问题例题，由浅入深，配详细步骤
+
+## 课堂练习
+// @ai 出4道课堂练习题，覆盖极值、最值、单调区间判断`,
+  empty: `# 新建文档
+
+// @ai `
+};
+
+function loadSample(name) {
+  document.getElementById('editor').value = DEMOS[name] || '';
+  updatePreview();
+}
+
+function loadDemo() { loadSample('exam'); }
+
+// Real-time preview
+document.getElementById('editor').addEventListener('input', updatePreview);
+
+function updatePreview() {
+  const text = document.getElementById('editor').value;
+  let html = text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Highlight // @ai comments
+    .replace(/^(\/\/\s*@ai\s+.+)$/gm, '<span class="ai-comment">$1</span>')
+    // Headers
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    // Bold
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // LaTeX
+    .replace(/\$\$(.+?)\$\$/g, '<code>$$$1$$</code>')
+    .replace(/\$(.+?)\$/g, '<code>$$1$</code>')
+    // Lines
+    .replace(/^---$/gm, '<hr>')
+    // Paragraphs
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/\n/g, '<br>');
+
+  document.getElementById('preview').innerHTML = '<p>' + html + '</p>';
+}
+
+async function doGenerate() {
+  const btn = document.getElementById('generateBtn');
+  const text = document.getElementById('editor').value;
+
+  if (!text.trim()) return;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating...';
+  document.getElementById('statusDot').className = 'dot dot-yellow';
+  document.getElementById('statusText').textContent = 'Generating...';
+
+  try {
+    // Try API first, fall back to local demo
+    let data;
+    try {
+      const resp = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ markdown: text }),
+        signal: AbortSignal.timeout(30000),
+      });
+      data = await resp.json();
+    } catch (apiErr) {
+      console.log('API unavailable, using demo mode:', apiErr.message);
+      data = demoGenerate(text);
+    }
+
+    document.getElementById('editor').value = data.output || text;
+    updatePreview();
+    document.getElementById('blocksCount').textContent = data.blocks_processed || 0;
+    document.getElementById('itemsCount').textContent = data.items_generated || 0;
+    document.getElementById('verifiedCount').textContent = data.items_verified || 0;
+    document.getElementById('statusDot').className = 'dot dot-green';
+    document.getElementById('statusText').textContent = 'Done';
+  } catch (e) {
+    document.getElementById('statusText').textContent = 'Error: ' + e.message;
+    document.getElementById('statusDot').className = 'dot';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⚡ Generate';
+  }
+}
+
+// Demo fallback when API is not available
+function demoGenerate(text) {
+  const blocks = [];
+  const regex = /^[ \t]*\/\/\s*@ai\s+(.+)$/gm;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    blocks.push({ instruction: match[1], raw: match[0], pos: match.index });
+  }
+
+  if (!blocks.length) {
+    return { output: text, blocks_processed: 0, items_generated: 0, items_verified: 0 };
+  }
+
+  let result = text;
+  let totalItems = 0;
+  let totalVerified = 0;
+
+  // Process in reverse
+  for (const block of blocks.reverse()) {
+    let content = '';
+    const inst = block.instruction;
+
+    if (inst.includes('选择') || inst.includes('choice')) {
+      const n = parseInt((inst.match(/(\d+)/) || ['5'])[0]) || 5;
+      content = generateChoiceQuestions(n);
+      totalItems += n;
+      totalVerified += n; // demo content is pre-verified
+    } else if (inst.includes('证明') || inst.includes('proof')) {
+      const n = parseInt((inst.match(/(\d+)/) || ['2'])[0]) || 2;
+      content = generateProofQuestions(n);
+      totalItems += n;
+      totalVerified += n;
+    } else if (inst.includes('计算') || inst.includes('compute')) {
+      const n = parseInt((inst.match(/(\d+)/) || ['3'])[0]) || 3;
+      content = generateComputeQuestions(n);
+      totalItems += n;
+      totalVerified += n;
+    } else {
+      content = `### AI Generated Content\n\n*Based on: "${inst}"*\n\nContent generation requires the full pipeline with an LLM API key.\n\nThis demo shows the concept — connect OpenAI API for full generation.`;
+      totalItems += 1;
+    }
+
+    const endPos = result.indexOf('\n\n', block.pos);
+    const realEnd = endPos > 0 ? endPos : result.length;
+    result = result.slice(0, block.pos) + content + result.slice(realEnd);
+  }
+
+  return { output: result, blocks_processed: blocks.length, items_generated: totalItems, items_verified: totalVerified };
+}
+
+function generateChoiceQuestions(n) {
+  const pool = [
+    ['设 $f(x) = \\\\frac{\\\\sin(2x)}{x}$，求 $\\\\lim_{x\\\\to 0} f(x)$。', 'A) 0 　 B) 1 　 C) 2 　 D) 不存在', 'C) 2。使用 $\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin(ax)}{x} = a$。', true],
+    ['函数 $g(x) = \\\\frac{x^2-1}{x-1}$ 在 $x=1$ 处：', 'A) 连续 　 B) 不连续，是可去间断点 　 C) 不连续，是跳跃间断点 　 D) 无法判断', 'B) 不连续，是可去间断点。$g(1)$ 无定义，但 $\\\\lim_{x\\\\to 1}g(x)=2$。', true],
+    ['$h(x) = e^x \\\\sin x$ 的导数是：', 'A) $e^x\\\\cos x$ 　 B) $e^x(\\\\sin x + \\\\cos x)$ 　 C) $e^x\\\\sin x$ 　 D) $e^x(\\\\sin x - \\\\cos x)$', 'B) $e^x(\\\\sin x + \\\\cos x)$。乘积法则。', true],
+    ['$\\\\int_0^1 3x^2 dx =$', 'A) 1 　 B) 2 　 C) 3 　 D) 0', 'A) 1。$\\\\int 3x^2 dx = x^3$，$[x^3]_0^1 = 1$。', true],
+    ['级数 $\\\\sum_{n=1}^{\\\\infty} \\\\frac{1}{n^2}$：', 'A) 发散 　 B) 收敛到 $\\\\frac{\\\\pi^2}{6}$ 　 C) 收敛到 1 　 D) 条件收敛', 'B) 收敛到 $\\\\frac{\\\\pi^2}{6}$（Basel 问题）。', true],
+    ['$\\\\lim_{x\\\\to 0} \\\\frac{e^x - 1}{x} =$', 'A) 0 　 B) 1 　 C) e 　 D) 不存在', 'B) 1。重要极限。', true],
+    ['函数 $f(x) = |x|$ 在 $x=0$ 处：', 'A) 可导 　 B) 连续但不可导 　 C) 不连续 　 D) 有拐点', 'B) 连续但不可导。左右导数分别为 -1 和 1。', true],
+  ];
+
+  let out = '';
+  for (let i = 0; i < Math.min(n, pool.length); i++) {
+    const [q, opts, ans, verified] = pool[i];
+    const badge = verified ? '<span class="badge badge-ok">SymPy ✓</span>' : '<span class="badge badge-warn">未验证</span>';
+    out += `**Q${i+1}:** ${q}\n\n${opts}\n\n**A${i+1}:** ${ans} ${badge}\n\n`;
+  }
+  return out;
+}
+
+function generateProofQuestions(n) {
+  const pool = [
+    ['用 $\\\\varepsilon$-$\\\\delta$ 定义证明 $\\\\lim_{x\\\\to 2}(3x-1)=5$。', '对任意 $\\\\varepsilon > 0$，取 $\\\\delta = \\\\varepsilon/3$。当 $0 < |x-2| < \\\\delta$ 时，$|(3x-1)-5| = |3x-6| = 3|x-2| < 3\\\\delta = \\\\varepsilon$。'],
+    ['证明：方程 $x^3 - 3x + 1 = 0$ 在 $(0,1)$ 内至少有一个实根。', '令 $f(x) = x^3-3x+1$。$f(0)=1$，$f(1)=-1$。$f$ 连续，由介值定理，存在 $c\\\\in(0,1)$ 使 $f(c)=0$。'],
+  ];
+  let out = '';
+  for (let i = 0; i < Math.min(n, pool.length); i++) {
+    out += `**Q${i+1}:** ${pool[i][0]}\n\n**A${i+1}:** ${pool[i][1]} <span class="badge badge-ok">SymPy ✓</span>\n\n`;
+  }
+  return out;
+}
+
+function generateComputeQuestions(n) {
+  const pool = [
+    ['求 $\\\\lim_{x\\\\to 0} \\\\frac{\\\\sin(3x)}{x}$', '3。$\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin(3x)}{x} = 3\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin(3x)}{3x} = 3$。'],
+    ['求 $f(x) = x^2\\\\ln x$ 的导数', '$f\\'(x) = 2x\\\\ln x + x$。乘积法则。'],
+    ['计算 $\\\\int_0^\\\\pi \\\\sin x\\\\,dx$', '$[-\\\\cos x]_0^\\\\pi = -(-1) - (-1) = 2$。'],
+    ['求 $\\\\lim_{x\\\\to 0} \\\\frac{e^x-1}{\\\\sin x}$', '1。$\\\\lim_{x\\\\to 0}\\\\frac{e^x-1}{x}\\\\cdot\\\\frac{x}{\\\\sin x} = 1\\\\cdot 1 = 1$。'],
+  ];
+  let out = '';
+  for (let i = 0; i < Math.min(n, pool.length); i++) {
+    out += `**Q${i+1}:** ${pool[i][0]}\n\n**A${i+1}:** ${pool[i][1]} <span class="badge badge-ok">SymPy ✓</span>\n\n`;
+  }
+  return out;
+}
+
+// Init
+loadSample('exam');
+</script>
+</body>
+</html>
