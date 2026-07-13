@@ -242,17 +242,18 @@ def _call_llm(
     api_key: str = "",
     model: str = "gpt-4o-mini",
 ) -> str:
-    """Call LLM for content generation."""
-    api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+    """Call LLM for content generation. Supports OpenAI and DeepSeek."""
+    api_key = api_key or os.getenv("OPENAI_API_KEY", "") or os.getenv("DEEPSEEK_API_KEY", "")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     if not api_key:
-        logger.warning("No OPENAI_API_KEY — using demo fallback")
+        logger.warning("No API key — using demo fallback")
         return _demo_fallback(user_prompt)
 
     try:
         import urllib.request
 
         req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
+            f"{base_url}/chat/completions",
             data=json.dumps({
                 "model": model,
                 "messages": [
@@ -475,7 +476,7 @@ def _parse_math_expr(latex: str):
 def generate(
     markdown: str,
     api_key: str = "",
-    model: str = "gpt-4o-mini",
+    model: str = "",
 ) -> GenerationResult:
     """Process a Markdown document: find // @ai blocks, generate content, verify.
 
@@ -530,6 +531,7 @@ Generate teaching materials based on the instruction above.
 Ensure mathematical correctness and use LaTeX for formulas."""
 
         # 3. Generate
+        model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         generation = _call_llm(SYSTEM_PROMPT, user_prompt, api_key=api_key, model=model)
 
         # 4. Verify each answer
