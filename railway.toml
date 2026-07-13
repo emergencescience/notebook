@@ -1,0 +1,6 @@
+[build]
+dockerfile = "backend/Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 30
