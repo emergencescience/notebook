@@ -94,7 +94,7 @@ The AI will replace these comments with generated content."></textarea>
 </main>
 
 <script>
-const API = '/api/generate';
+const API = 'generate';  // relative — proxies via portal rewrites
 
 const DEMOS = {
   exam: `# 高等数学 期中试卷
@@ -301,7 +301,7 @@ function generateProofQuestions(n) {
 function generateComputeQuestions(n) {
   const pool = [
     ['求 $\\\\lim_{x\\\\to 0} \\\\frac{\\\\sin(3x)}{x}$', '3。$\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin(3x)}{x} = 3\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin(3x)}{3x} = 3$。'],
-    ['求 $f(x) = x^2\\\\ln x$ 的导数', '$f\\'(x) = 2x\\\\ln x + x$。乘积法则。'],
+    ['求 $f(x) = x^2\\\\ln x$ 的导数', '$f\\\'(x) = 2x\\\\ln x + x$。乘积法则。'],
     ['计算 $\\\\int_0^\\\\pi \\\\sin x\\\\,dx$', '$[-\\\\cos x]_0^\\\\pi = -(-1) - (-1) = 2$。'],
     ['求 $\\\\lim_{x\\\\to 0} \\\\frac{e^x-1}{\\\\sin x}$', '1。$\\\\lim_{x\\\\to 0}\\\\frac{e^x-1}{x}\\\\cdot\\\\frac{x}{\\\\sin x} = 1\\\\cdot 1 = 1$。'],
   ];
