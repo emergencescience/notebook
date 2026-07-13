@@ -45,7 +45,13 @@
   .divider { width: 1px; background: #1e293b; }
   .demo-sample { font-size: 12px; color: #64748b; padding: 8px 12px; border-bottom: 1px solid #1e293b; background: #0f1117; display: flex; gap: 8px; overflow-x: auto; }
   .demo-sample button { white-space: nowrap; padding: 3px 10px; font-size: 11px; }
+  /* KaTeX overrides for dark theme */
+  .katex { color: #e2e8f0; }
+  .katex-display { margin: 8px 0; overflow-x: auto; }
 </style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 </head>
 <body>
 
@@ -161,9 +167,6 @@ function updatePreview() {
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
     // Bold
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    // LaTeX
-    .replace(/\$\$(.+?)\$\$/g, '<code>$$$1$$</code>')
-    .replace(/\$(.+?)\$/g, '<code>$$1$</code>')
     // Lines
     .replace(/^---$/gm, '<hr>')
     // Paragraphs
@@ -171,6 +174,13 @@ function updatePreview() {
     .replace(/\n/g, '<br>');
 
   document.getElementById('preview').innerHTML = '<p>' + html + '</p>';
+  renderMathInElement(document.getElementById('preview'), {
+    delimiters: [
+      {left: '$$', right: '$$', display: true},
+      {left: '$', right: '$', display: false},
+    ],
+    throwOnError: false,
+  });
 }
 
 async function doGenerate() {
