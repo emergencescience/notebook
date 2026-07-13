@@ -202,7 +202,7 @@ async function doGenerate() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ markdown: text }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(60000),
       });
       data = await resp.json();
     } catch (apiErr) {
@@ -311,7 +311,7 @@ function generateProofQuestions(n) {
 function generateComputeQuestions(n) {
   const pool = [
     ['求 $\\\\lim_{x\\\\to 0} \\\\frac{\\\\sin(3x)}{x}$', '3。$\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin(3x)}{x} = 3\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin(3x)}{3x} = 3$。'],
-    ['求 $f(x) = x^2\\\\ln x$ 的导数', '$f\\\'(x) = 2x\\\\ln x + x$。乘积法则。'],
+    ['求 $f(x) = x^2\\\\ln x$ 的导数', '$f\u2032(x) = 2x\\\\ln x + x$。乘积法则。'],
     ['计算 $\\\\int_0^\\\\pi \\\\sin x\\\\,dx$', '$[-\\\\cos x]_0^\\\\pi = -(-1) - (-1) = 2$。'],
     ['求 $\\\\lim_{x\\\\to 0} \\\\frac{e^x-1}{\\\\sin x}$', '1。$\\\\lim_{x\\\\to 0}\\\\frac{e^x-1}{x}\\\\cdot\\\\frac{x}{\\\\sin x} = 1\\\\cdot 1 = 1$。'],
   ];
