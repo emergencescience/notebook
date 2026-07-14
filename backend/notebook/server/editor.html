@@ -157,7 +157,15 @@ document.getElementById('editor').addEventListener('input', updatePreview);
 
 function updatePreview() {
   const text = document.getElementById('editor').value;
-  let html = text
+
+  // Protect $$...$$ display math blocks from line processing
+  const mathBlocks = [];
+  let protected_ = text.replace(/\$\$([\s\S]*?)\$\$/g, (match, inner) => {
+    mathBlocks.push(inner);
+    return '%%MATHBLOCK' + (mathBlocks.length - 1) + '%%';
+  });
+
+  let html = protected_
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     // Highlight // @ai comments
     .replace(/^(\/\/\s*@ai\s+.+)$/gm, '<span class="ai-comment">$1</span>')
@@ -165,13 +173,18 @@ function updatePreview() {
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    // Bold
+    // Bold (but not inside math placeholders)
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     // Lines
     .replace(/^---$/gm, '<hr>')
     // Paragraphs
     .replace(/\n\n/g, '</p><p>')
     .replace(/\n/g, '<br>');
+
+  // Restore math blocks
+  html = html.replace(/%%MATHBLOCK(\d+)%%/g, (_, i) => {
+    return '$$' + mathBlocks[parseInt(i)] + '$$';
+  });
 
   document.getElementById('preview').innerHTML = '<p>' + html + '</p>';
   renderMathInElement(document.getElementById('preview'), {
