@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from notebook.teach.generator import generate, parse_ai_blocks
+from notebook.verify import verify_document, VerificationResult
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("veriteach.server")
@@ -41,6 +42,16 @@ class GenerateResponse(BaseModel):
     items_generated: int
     items_verified: int
     errors: list[str] = []
+
+
+class VerifyRequest(BaseModel):
+    content: str  # LaTeX or markdown with equations
+
+
+class VerifyResponse(BaseModel):
+    equations_found: int
+    results: list[dict]
+    summary: str
 
 
 class HealthResponse(BaseModel):
@@ -93,6 +104,36 @@ async def parse_document(req: GenerateRequest):
             for b in blocks
         ],
     }
+
+
+@app.post("/verify", response_model=VerifyResponse)
+async def verify_content(req: VerifyRequest):
+    """Verify LaTeX equations using SymPy. No LLM needed."""
+    if not req.content.strip():
+        raise HTTPException(400, "No content provided")
+
+    results = verify_document(req.content)
+
+    if not results:
+        return VerifyResponse(
+            equations_found=0, results=[],
+            summary="No equations found. Use $...$ or $$...$$ for LaTeX.",
+        )
+
+    verified = sum(1 for r in results if r.status == "verified")
+    errors = sum(1 for r in results if r.status == "error")
+    inconclusive = sum(1 for r in results if r.status == "inconclusive")
+
+    summary = f"Found {len(results)} equations: {verified} verified, {errors} errors, {inconclusive} inconclusive."
+
+    return VerifyResponse(
+        equations_found=len(results),
+        results=[{
+            "line": r.line, "equation": r.equation,
+            "status": r.status, "detail": r.detail,
+        } for r in results],
+        summary=summary,
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
