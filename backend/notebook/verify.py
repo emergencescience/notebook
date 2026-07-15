@@ -107,6 +107,11 @@ def _preprocess_latex(latex: str) -> str:
     # So: match standalone 'e' (not preceded by backslash) followed by ^.
     s = re.sub(r'(?<!\\)e\s*\^\{?', r'\\exp{', s)
 
+    # d \exp{...} → \exp{...} inside integrals
+    # "∫ x d(e^x)" = "∫ x e^x dx"  (d(e^x) = e^x dx)
+    # SymPy misparses 'd' as a variable; this fixes the differential notation.
+    s = re.sub(r'd\s*\\exp\{', r'\\exp{', s)
+
     # Remove LaTeX thin spaces
     s = s.replace(r'\,', '')
 
