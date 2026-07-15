@@ -1,10 +1,17 @@
-"""SymPy formal verification engine — validate LaTeX equations in documents."""
+"""SymPy formal verification engine — validate LaTeX equations in documents.
+
+Architecture:
+  Tier 1: sympy.parsing.latex.parse_latex()   (SymPy native, deterministic)
+  Tier 2: LLM translation LaTeX → SymPy Python (fallback for edge cases)
+  Then:   SymPy verification (deterministic — LLM only does translation)
+"""
 
 from __future__ import annotations
 
 import logging
+import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger("exobrain.verify")
 
@@ -17,6 +24,11 @@ class VerificationResult:
     detail: str        # human-readable explanation
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Equation extraction
+# ═══════════════════════════════════════════════════════════════════════
+
+
 def extract_equations(markdown: str) -> list[tuple[int, str, str]]:
     """Extract all LaTeX equations from markdown.
 
@@ -27,265 +39,502 @@ def extract_equations(markdown: str) -> list[tuple[int, str, str]]:
     they can span multiple lines.  Inline equations ($...$) can never
     cross line boundaries so they're still processed line-by-line.
     """
-    equations = []
+    equations: list[tuple[int, str, str]] = []
     lines = markdown.split("\n")
 
     # ── multi-line block equations ($$ … $$) ──────────────────────────
-    # Must be matched against the FULL text, not individual lines.
     block_pattern = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
     for match in block_pattern.finditer(markdown):
         eq = match.group(1).strip()
         if eq and len(eq) > 2 and eq != "\\":
-            line_idx = markdown[:match.start()].count("\n") + 1
+            line_idx = markdown[: match.start()].count("\n") + 1
             equations.append((line_idx, eq, "block"))
 
     # ── single-line inline equations ($ … $) ──────────────────────────
-    # Inline equations cannot span lines, so line-by-line is fine.
     inline_pattern = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)")
 
     for line_idx, line in enumerate(lines, 1):
         for match in inline_pattern.finditer(line):
             eq = match.group(1).strip()
-            # Keep any non-trivial equation. (Previously equations starting
-            # with a LaTeX command like \\frac, \\sin, \\sum were wrongly
-            # dropped — that silently skipped ~half of real equations.)
             if eq and len(eq) > 2:
                 equations.append((line_idx, eq, "inline"))
 
-    # Sort by line number so results appear in document order
     equations.sort(key=lambda x: x[0])
     return equations
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# LaTeX → SymPy  (two-tier)
+# ═══════════════════════════════════════════════════════════════════════
+
+
 def latex_to_sympy(latex: str) -> tuple:
-    """Convert LaTeX to SymPy expression.
+    """Convert LaTeX string to SymPy expression.
+
+    Tier 1: SymPy's built-in ANTLR-based LaTeX parser.
+    Tier 2: LLM translation (deepseek-v4-flash) for edge cases.
 
     Returns (sympy_expr, None) on success, (None, error_message) on failure.
-    Tries sympy's built-in LaTeX parser first, falls back to manual conversion.
     """
-    # Try sympy's built-in parser
+    # ── Preprocess: fix known SymPy parser edge cases ─────────────────
+    latex = _preprocess_latex(latex)
+
+    # ── Tier 1: SymPy native parser ─────────────────────────────────
     try:
         from sympy.parsing.latex import parse_latex
         expr = parse_latex(latex)
         return (expr, None)
-    except Exception:
-        pass  # Fall through to manual conversion
+    except Exception as e:
+        logger.debug("SymPy native parser failed for %r: %s", latex[:80], e)
 
-    # Manual fallback for common LaTeX patterns
-    try:
-        import sympy as sp
-        converted = _manual_latex_convert(latex)
-        if converted is None:
-            return (None, "Could not parse LaTeX expression")
-        expr = sp.sympify(converted)
-        return (expr, None)
-    except Exception as e2:
-        return (None, f"Parse error: {str(e2)[:100]}")
+    # ── Tier 2: LLM fallback ────────────────────────────────────────
+    return _llm_translate(latex)
 
 
-def _manual_latex_convert(latex: str) -> str | None:
-    """Manual conversion of common LaTeX to SymPy-compatible Python.
+def _preprocess_latex(latex: str) -> str:
+    """Minimal LaTeX preprocessing for known SymPy parser edge cases.
 
-    Handles the most common math patterns in STEM papers.
+    Fixes applied:
+      - e^{...} or e^... → \\exp{...}   (Euler's number)
+      - \\, (thin space) → removed
+    Only fixes well-understood patterns; doesn't try to be a full converter.
     """
-    s = latex.strip()
+    s = latex
 
-    # Clean up: implicit multiplication
-    s = re.sub(r'(\d)([a-zA-Z])', r'\1*\2', s)  # 2x → 2*x
-    s = re.sub(r'\)\(\(', r')*(', s)       # (a)(b) → (a)*(b)
-    s = re.sub(r'\)([a-zA-Z])', r')*\1', s)  # (a)b → (a)*b
-    s = re.sub(r'([a-zA-Z])\(', r'\1*(', s)  # a(b) → a*(b)
-    s = re.sub(r'([a-zA-Z])\s+(exp|sin|cos|tan|log|ln|sqrt)\b', r'\1*\2', s)  # x exp → x*exp
-    # e^x → exp(x)  (Euler's number — 'e' followed by ^ or superscript)
-    # Handles: e^x, e^{2x}, e^{x+1}
-    s = re.sub(r'\be\s*\^\{?', 'exp(', s)
-    # Fix implicit multiplication AFTER e^→exp conversion:
-    # "x exp(" → "x*exp(", "2 exp(" → "2*exp(", ")exp(" → ")*exp("
-    s = re.sub(r'([a-zA-Z0-9])\s*(?=exp\()', r'\1*(', s)  # xexp( → x*exp(
-    # Close any exp( parentheses that were opened by e^{...} → exp(...)
-    # Count: every 'exp(' from e^ should have a matching ')'
-    # We add closing parens after all other replacements
+    # e^{...} → \exp{...}  (brace matching)
+    # Match 'e' not preceded by a letter/digit (so 'de^{x}' → 'd\exp{x}')
+    s = re.sub(r'(?<![a-zA-Z0-9])e\s*\^\{?', r'\\exp{', s)
+    # Close unclosed \exp{... if needed (SymPy handles it, but be safe)
 
-    # Handle common LaTeX formatting
-    replacements = [
-        (r"\left", ""), (r"\right", ""),
-        (r"\cdot", "*"), (r"\times", "*"),
-        (r"\frac{", "("), (r"}{", ")/("),  # \frac{a}{b} → (a)/(b) — needs careful handling
-        (r"\sqrt{", "sqrt("),
-        (r"\sin", "sin"), (r"\cos", "cos"), (r"\tan", "tan"),
-        (r"\log", "log"), (r"\ln", "ln"),
-        (r"\exp", "exp"),
-        (r"\pi", "pi"), (r"\infty", "oo"),
-        (r"\alpha", "alpha"), (r"\beta", "beta"), (r"\gamma", "gamma"),
-        (r"\delta", "delta"), (r"\epsilon", "epsilon"), (r"\theta", "theta"),
-        (r"\lambda", "lambda_"), (r"\mu", "mu"), (r"\sigma", "sigma"),
-        (r"\omega", "omega"), (r"\Delta", "Delta"),
-        (r"\sum", "Sum"), (r"\prod", "Product"), (r"\int", "Integral"),
-        (r"\partial", "Derivative"),
-        (r"\mathbf{", ""), (r"\mathcal{", ""),
-        (r"\mathbb{", ""), (r"\Re", "re"), (r"\Im", "im"),
-        (r"\operatorname{", ""),
-        (r"\text{", ""),
-        (r"\quad", " "), (r"\qquad", "  "),
-        (r"\\", " "),
-        (r"\{", "("), (r"\}", ")"),
-        ("{", "("), ("}", ")"),
-        (r"\pm", " "),  # Split: a +/- b → a b (can't verify ± equations, mark inconclusive)
-        (r"\mp", " "),
-        (r"\to", "->"),
-        (r"\rightarrow", "->"),
-        (r"\Rightarrow", "=>"),
-        (r"\neq", "!="),
-        (r"\leq", "<="),
-        (r"\geq", ">="),
-        (r"\approx", "~="),
-        (r"\equiv", "=="),
-        (r"\propto", "~"),
-        ("^T", "**T"),  # transpose
-        ("^\\top", "**T"),
-        (r"\'", ""),  # derivative prime notation
-        (r"\prime", ""),
-        (r"\dot{", "diff("),  # time derivative
-        (r"\ddot{", "diff(diff("),
-        (r"\hat{", ""),
-        (r"\bar{", ""),
-        (r"\vec{", ""),
-    ]
+    # e^x → exp(x)  (without braces, e.g. 'e^x')
+    # Already covered by the regex above: e^ → \exp{
 
-    # Handle \frac first (most complex)
-    s = _handle_frac(s)
-
-    for old, new in replacements:
-        s = s.replace(old, new)
-
-    # Clean up unmatched braces
-    while "(" in s and s.count("(") > s.count(")"):
-        s += ")"
-    while ")" in s and s.count(")") > s.count("("):
-        s = "(" + s
-
-    return s if s else None
-
-
-def _handle_frac(s: str) -> str:
-    """Handle \\frac{numerator}{denominator} → (numerator)/(denominator)."""
-    while "\\frac" in s:
-        idx = s.index("\\frac")
-        # Skip past \frac{
-        brace_open = s.index("{", idx)
-        depth = 1
-        pos = brace_open + 1
-        while depth > 0 and pos < len(s):
-            if s[pos] == "{":
-                depth += 1
-            elif s[pos] == "}":
-                depth -= 1
-            pos += 1
-        num = s[brace_open + 1:pos - 1]
-
-        # Now parse denominator
-        if pos < len(s) and s[pos] == "{":
-            depth = 1
-            denom_start = pos + 1
-            pos = denom_start
-            while depth > 0 and pos < len(s):
-                if s[pos] == "{":
-                    depth += 1
-                elif s[pos] == "}":
-                    depth -= 1
-                pos += 1
-            denom = s[denom_start:pos - 1]
-        else:
-            break
-
-        s = s[:idx] + f"({num})/({denom})" + s[pos:]
+    # Remove LaTeX thin spaces
+    s = s.replace(r'\,', '')
 
     return s
+
+
+def _llm_translate(latex: str) -> tuple:
+    """Use LLM to translate LaTeX → SymPy Python expression string.
+
+    The LLM only does TRANSLATION.  Verification is still done
+    deterministically by SymPy afterwards — the LLM never does math.
+    """
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    model = os.getenv("OPENAI_MODEL", "deepseek-v4-flash")
+
+    if not api_key:
+        return (None, "No LLM API key configured — cannot parse LaTeX")
+
+    try:
+        import json as _json
+        from urllib.request import Request, urlopen
+
+        prompt = (
+            "Convert this LaTeX expression to a SymPy-compatible Python expression string. "
+            "Return ONLY the Python expression, nothing else. No explanation, no markdown.\n\n"
+            "Rules:\n"
+            "- e^x → exp(x)\n"
+            "- x^2 → x**2\n"
+            "- \\sin(x) → sin(x), \\cos → cos, \\tan → tan, \\ln → ln\n"
+            "- \\frac{a}{b} → a/b\n"
+            "- \\sqrt{x} → sqrt(x)\n"
+            "- \\int f(x) dx → Integral(f(x), x)\n"
+            "- \\int_a^b f(x) dx → Integral(f(x), (x, a, b))\n"
+            "- \\sum_{i=1}^n → Sum(expr, (i, 1, n))\n"
+            "- \\lim_{x→a} f(x) → Limit(f(x), x, a)\n"
+            "- \\frac{d}{dx} f(x) → Derivative(f(x), x)\n"
+            "- \\pi → pi, \\infty → oo\n"
+            "- Implicit multiplication: 2x → 2*x, x y → x*y\n"
+            "- sin^2(x) → sin(x)**2 (NOT sin**2(x))\n"
+            "- e is Euler's number → use exp(), not E\n"
+            "- ∫ x d(e^x) means ∫ x * exp(x) dx, NOT Integral(x, e)**x\n\n"
+            f"LaTeX: {latex}\n\n"
+            "SymPy Python expression:"
+        )
+
+        body = _json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 120,
+        }).encode()
+
+        req = Request(
+            f"{base_url.rstrip('/')}/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        resp = urlopen(req, timeout=10)
+        data = _json.loads(resp.read())
+        sympy_str = data["choices"][0]["message"]["content"].strip()
+
+        # Strip markdown fences if present
+        sympy_str = re.sub(r"^```(?:python|py)?\s*", "", sympy_str)
+        sympy_str = re.sub(r"\s*```$", "", sympy_str)
+
+        # Validate: sympify the LLM's output
+        import sympy as sp
+        expr = sp.sympify(sympy_str)
+        logger.info("LLM translated %r → %s", latex[:60], sympy_str[:80])
+        return (expr, None)
+
+    except Exception as e:
+        return (None, f"LLM translation failed: {str(e)[:120]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Equation verification
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def verify_equation(latex: str) -> VerificationResult:
     """Verify a single LaTeX equation.
 
-    For equalities (a = b): check if (a - b) simplifies to 0.
-    For formulas (no =): verify structural validity.
-    For integrals: mark inconclusive (verify by differentiating the antiderivative).
+    Strategy (in order):
+      1. Multi-equality (A = B = C) → split and verify each segment
+      2. Integral equalities         → verify by differentiation
+      3. Algebraic equalities        → verify LHS − RHS = 0
+      4. Standalone formulas         → verify structural validity
     """
-    # ── Integral detection ──────────────────────────────────────────
-    # Equations with \int need antiderivative-differentiation verification,
-    # which is a separate strategy from LHS-RHS algebraic checking.
-    # Mark as inconclusive with a helpful hint rather than returning an error.
-    if r"\int" in latex or "Integral" in latex or "integral" in latex.lower():
-        return VerificationResult(
-            line=0, equation=latex,
-            status="inconclusive",
-            detail="🔍 Integral detected — verify by differentiating the antiderivative. "
-                   "Use SymPy: diff(claimed_F, x) == integrand."
-        )
+    # ── Multi-equality splitting ────────────────────────────────────
+    if _count_equality_signs(latex) >= 2:
+        return _verify_multi_equality(latex)
 
-    # Check if it's an equality
+    # ── Integral verification ───────────────────────────────────────
+    if r"\int" in latex:
+        return _verify_integral(latex)
+
+    # ── Equality verification ───────────────────────────────────────
     if "=" in latex and "\\neq" not in latex:
-        # Split on = but be careful about LaTeX
-        parts = _split_equality(latex)
-        if len(parts) == 2:
-            lhs_expr, lhs_err = latex_to_sympy(parts[0])
-            rhs_expr, rhs_err = latex_to_sympy(parts[1])
+        return _verify_single_equality(latex)
 
-            if lhs_expr is not None and rhs_expr is not None:
-                try:
-                    import sympy as sp
-                    diff = sp.simplify(lhs_expr - rhs_expr)
-                    if diff == 0:
-                        return VerificationResult(
-                            line=0, equation=latex,
-                            status="verified",
-                            detail="✅ Verified: LHS − RHS = 0"
-                        )
-                    # If diff is a non-zero constant, it's definitely wrong
-                    if diff.is_number and diff != 0:
-                        return VerificationResult(
-                            line=0, equation=latex,
-                            status="error",
-                            detail=f"❌ LHS ≠ RHS (difference = {diff})"
-                        )
-                    # Otherwise inconclusive (free variables)
-                    return VerificationResult(
-                        line=0, equation=latex,
-                        status="inconclusive",
-                        detail=f"⚠️ LHS − RHS = {diff}. May be correct with additional constraints."
-                    )
-                except Exception as e:
-                    return VerificationResult(
-                        line=0, equation=latex,
-                        status="error",
-                        detail=f"Simplification error: {str(e)[:100]}"
-                    )
-            else:
-                err_msg = lhs_err or rhs_err or "Parse error"
-                return VerificationResult(
-                    line=0, equation=latex,
-                    status="error",
-                    detail=f"Parse error: {err_msg}"
-                )
-
-    # Not an equality — try to parse as a valid expression
+    # ── Expression validation ───────────────────────────────────────
     expr, err = latex_to_sympy(latex)
     if expr is not None:
         return VerificationResult(
             line=0, equation=latex,
             status="verified",
-            detail="✅ Valid expression (non-equality)"
+            detail="✅ Valid expression"
         )
-    else:
+    return VerificationResult(
+        line=0, equation=latex,
+        status="error",
+        detail=f"Parse error: {err}"
+    )
+
+
+def _count_equality_signs(latex: str) -> int:
+    """Count = signs outside brace groups."""
+    depth = 0
+    count = 0
+    for ch in latex:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "=" and depth == 0:
+            count += 1
+    return count
+
+
+def _split_all_equalities(latex: str) -> list[str]:
+    """Split on all = signs outside brace groups. Returns list of segments."""
+    depth = 0
+    segments: list[str] = []
+    last = 0
+    for i, ch in enumerate(latex):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "=" and depth == 0:
+            segments.append(latex[last:i].strip())
+            last = i + 1
+    segments.append(latex[last:].strip())
+    return segments
+
+
+def _verify_multi_equality(latex: str) -> VerificationResult:
+    """Verify A = B = C = ... by checking each adjacent pair.
+
+    Reports the first failing segment; if all pass, reports verified.
+    """
+    import sympy as sp
+
+    segments = _split_all_equalities(latex)
+    if len(segments) < 2:
+        return _verify_integral(latex) if r"\int" in latex else _verify_single_equality(latex)
+
+    results_detail: list[str] = []
+    all_ok = True
+    has_error = False
+
+    for i in range(len(segments) - 1):
+        lhs_expr, lhs_err = latex_to_sympy(segments[i])
+        rhs_expr, rhs_err = latex_to_sympy(segments[i + 1])
+
+        if lhs_expr is None or rhs_expr is None:
+            err = lhs_err or rhs_err or "?"
+            results_detail.append(f"  Segment {i+1}: parse error — {err}")
+            has_error = True
+            all_ok = False
+            continue
+
+        try:
+            diff = sp.simplify(lhs_expr - rhs_expr)
+            if diff == 0:
+                results_detail.append(f"  {segments[i][:30]} = {segments[i+1][:30]}  ✅")
+            elif isinstance(diff, sp.core.numbers.Zero) or diff == 0:
+                results_detail.append(f"  {segments[i][:30]} = {segments[i+1][:30]}  ✅")
+            else:
+                results_detail.append(
+                    f"  {segments[i][:30]} = {segments[i+1][:30]}  ⚠️ diff={diff}"
+                )
+                all_ok = False
+        except Exception as e:
+            results_detail.append(f"  {segments[i][:30]} = {segments[i+1][:30]}  ❌ {e}")
+            has_error = True
+            all_ok = False
+
+    detail_text = "; ".join(results_detail)
+    if all_ok:
+        return VerificationResult(
+            line=0, equation=latex,
+            status="verified",
+            detail=f"✅ Chain verified ({len(segments)-1} segments): {detail_text}"
+        )
+    if has_error:
+        return VerificationResult(
+            line=0, equation=latex,
+            status="error",
+            detail=f"❌ Chain verification failed: {detail_text}"
+        )
+    return VerificationResult(
+        line=0, equation=latex,
+        status="inconclusive",
+        detail=f"⚠️ Chain inconclusive: {detail_text}"
+    )
+
+
+def _verify_single_equality(latex: str) -> VerificationResult:
+    """Verify an algebraic equality: simplify(LHS − RHS) == 0."""
+    parts = _split_equality(latex)
+    if len(parts) != 2:
+        expr, err = latex_to_sympy(latex)
+        if expr is not None:
+            return VerificationResult(
+                line=0, equation=latex,
+                status="verified",
+                detail="✅ Valid expression"
+            )
+        return VerificationResult(
+            line=0, equation=latex,
+            status="error",
+            detail=f"Cannot split equality: {latex}"
+        )
+
+    lhs_expr, lhs_err = latex_to_sympy(parts[0])
+    rhs_expr, rhs_err = latex_to_sympy(parts[1])
+
+    if lhs_expr is None or rhs_expr is None:
+        err_msg = lhs_err or rhs_err or "Parse error"
+        return VerificationResult(
+            line=0, equation=latex,
+            status="error",
+            detail=f"Parse error: {err_msg}"
+        )
+
+    try:
+        import sympy as sp
+        diff = sp.simplify(lhs_expr - rhs_expr)
+        if diff == 0:
+            return VerificationResult(
+                line=0, equation=latex,
+                status="verified",
+                detail="✅ Verified: LHS − RHS = 0"
+            )
+        if diff.is_number:
+            return VerificationResult(
+                line=0, equation=latex,
+                status="error",
+                detail=f"❌ LHS ≠ RHS (difference = {diff})"
+            )
+        return VerificationResult(
+            line=0, equation=latex,
+            status="inconclusive",
+            detail=f"⚠️ LHS − RHS = {diff}. May be correct with additional constraints."
+        )
+    except Exception as e:
+        return VerificationResult(
+            line=0, equation=latex,
+            status="error",
+            detail=f"Simplification error: {str(e)[:100]}"
+        )
+
+
+def _verify_integral(latex: str) -> VerificationResult:
+    """Verify integral equalities.
+
+    Strategy:
+      - F(x) = ∫ f(x) dx   →  try: diff(F, x) == f(x), or: integrate(f, x) == F + C
+      - ∫ f(x) dx = F(x)   →  same (swap sides)
+      - Standalone integral →  inconclusive
+    """
+    import sympy as sp
+
+    expr, err = latex_to_sympy(latex)
+    if expr is None:
+        # Try LLM fallback directly (SymPy native parser may have misparsed)
         return VerificationResult(
             line=0, equation=latex,
             status="error",
             detail=f"Parse error: {err}"
         )
 
+    # Case 1: Eq(LHS, RHS) with integral on one side
+    if isinstance(expr, sp.Equality):
+        lhs, rhs = expr.lhs, expr.rhs
+        if isinstance(rhs, sp.Integral):
+            return _verify_integral_eq(latex, lhs, rhs)
+        if isinstance(lhs, sp.Integral):
+            return _verify_integral_eq(latex, rhs, lhs)
+
+        # No explicit Integral object — might have been misparsed
+        # Try algebraic check as fallback
+        try:
+            diff = sp.simplify(lhs - rhs)
+            if diff == 0:
+                return VerificationResult(
+                    line=0, equation=latex,
+                    status="verified",
+                    detail="✅ Verified: LHS − RHS = 0"
+                )
+            # Try differentiating one side
+            return _try_differentiate_check(latex, lhs, rhs)
+        except Exception as e:
+            return VerificationResult(
+                line=0, equation=latex,
+                status="error",
+                detail=f"Integral verification error: {str(e)[:100]}"
+            )
+
+    # Case 2: Standalone Integral expression
+    if isinstance(expr, sp.Integral):
+        return VerificationResult(
+            line=0, equation=latex,
+            status="inconclusive",
+            detail="🔍 Integral expression — no antiderivative to verify against."
+        )
+
+    # Case 3: Misparsed — the LLM might help
+    return VerificationResult(
+        line=0, equation=latex,
+        status="inconclusive",
+        detail=f"🔍 Integral detected but parse gave: {expr}. Try rewriting as F(x) = ∫ f(x) dx."
+    )
+
+
+def _verify_integral_eq(
+    latex: str, claimed_F, integrand: "sp.Integral",
+) -> VerificationResult:
+    """Verify ∫ f(x) dx = F(x) using both differentiation and integration."""
+    import sympy as sp
+
+    # If claimed_F is an undefined function like F(x), this is a definition,
+    # not a claim to verify.  Mark as assumed-true.
+    from sympy.core.function import AppliedUndef
+    if isinstance(claimed_F, AppliedUndef):
+        return VerificationResult(
+            line=0, equation=latex,
+            status="verified",
+            detail="✅ Definition: F(x) is defined as this integral (assumed true)"
+        )
+
+    try:
+        f = integrand.function
+        var = integrand.variables[0] if integrand.variables else sp.Symbol("x")
+
+        # Method 1: Differentiate the claimed antiderivative
+        derivative = sp.diff(claimed_F, var)
+        diff_check = sp.simplify(derivative - f)
+
+        if diff_check == 0:
+            return VerificationResult(
+                line=0, equation=latex,
+                status="verified",
+                detail=f"✅ Verified: d/d{var}({claimed_F}) = {f} = integrand"
+            )
+
+        # Method 2: Integrate the integrand and compare
+        try:
+            computed = sp.integrate(f, var)
+            diff2 = sp.simplify(claimed_F - computed)
+            if diff2 == 0 or (isinstance(diff2, sp.Number) and diff2 == 0):
+                return VerificationResult(
+                    line=0, equation=latex,
+                    status="verified",
+                    detail=f"✅ Verified: ∫ {f} d{var} = {computed} = claimed F"
+                )
+        except Exception:
+            pass  # integrate() may not find a closed form
+
+        # Neither method confirmed — report the diff
+        return VerificationResult(
+            line=0, equation=latex,
+            status="error",
+            detail=f"❌ d/d{var}(claimed F) = {derivative} ≠ {f} (diff = {diff_check})"
+        )
+
+    except Exception as e:
+        return VerificationResult(
+            line=0, equation=latex,
+            status="error",
+            detail=f"Integral verification error: {str(e)[:100]}"
+        )
+
+
+def _try_differentiate_check(latex: str, lhs, rhs) -> VerificationResult:
+    """Fallback: try to check by differentiating (for implicit integral equalities)."""
+    import sympy as sp
+
+    x = sp.Symbol("x")
+    try:
+        # Try differentiation check: is d(lhs)/dx == d(rhs)/dx?
+        d_lhs = sp.diff(lhs, x)
+        d_rhs = sp.diff(rhs, x)
+        diff = sp.simplify(d_lhs - d_rhs)
+        if diff == 0:
+            return VerificationResult(
+                line=0, equation=latex,
+                status="verified",
+                detail="✅ Verified: derivatives equal (LHS and RHS differ by constant)"
+            )
+        return VerificationResult(
+            line=0, equation=latex,
+            status="inconclusive",
+            detail=f"⚠️ d(LHS)/dx − d(RHS)/dx = {diff}"
+        )
+    except Exception:
+        return VerificationResult(
+            line=0, equation=latex,
+            status="inconclusive",
+            detail="🔍 Could not verify integral equality automatically."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════
+
 
 def _split_equality(latex: str) -> list[str]:
-    """Split an equation on =, being careful about LaTeX groups."""
-    # Simple heuristic: find the first = that's not inside braces
+    """Split an equation on the first = outside brace groups."""
     depth = 0
     for i, ch in enumerate(latex):
         if ch == "{":
@@ -294,25 +543,28 @@ def _split_equality(latex: str) -> list[str]:
             depth -= 1
         elif ch == "=" and depth == 0:
             lhs = latex[:i].strip()
-            rhs = latex[i+1:].strip()
+            rhs = latex[i + 1 :].strip()
             return [lhs, rhs] if lhs and rhs else [latex]
     return [latex]
 
 
-def verify_document(markdown: str) -> list[VerificationResult]:
-    """Verify all equations in a document.
+# ═══════════════════════════════════════════════════════════════════════
+# Document-level API
+# ═══════════════════════════════════════════════════════════════════════
 
-    Returns list of VerificationResult, one per equation.
-    """
+
+def verify_document(markdown: str) -> list[VerificationResult]:
+    """Verify all equations in a document."""
     equations = extract_equations(markdown)
     if not equations:
         return []
 
-    results = []
+    results: list[VerificationResult] = []
     for line_idx, eq, display_mode in equations:
         result = verify_equation(eq)
         result.line = line_idx
-        result.equation = f"{'$$' if display_mode == 'block' else '$'} {eq} {'$$' if display_mode == 'block' else '$'}"
+        wrapper = "$$" if display_mode == "block" else "$"
+        result.equation = f"{wrapper} {eq} {wrapper}"
         results.append(result)
 
     return results
