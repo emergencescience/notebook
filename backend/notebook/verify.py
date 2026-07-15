@@ -101,13 +101,11 @@ def _preprocess_latex(latex: str) -> str:
     """
     s = latex
 
-    # e^{...} → \exp{...}  (brace matching)
-    # Match 'e' not preceded by a letter/digit (so 'de^{x}' → 'd\exp{x}')
-    s = re.sub(r'(?<![a-zA-Z0-9])e\s*\^\{?', r'\\exp{', s)
-    # Close unclosed \exp{... if needed (SymPy handles it, but be safe)
-
-    # e^x → exp(x)  (without braces, e.g. 'e^x')
-    # Already covered by the regex above: e^ → \exp{
+    # e^{...} or e^... → \exp{...}
+    # In standard math LaTeX, 'e' followed by '^' is ALWAYS Euler's number.
+    # The only exception is LaTeX commands like \epsilon, \beta (preceded by \).
+    # So: match standalone 'e' (not preceded by backslash) followed by ^.
+    s = re.sub(r'(?<!\\)e\s*\^\{?', r'\\exp{', s)
 
     # Remove LaTeX thin spaces
     s = s.replace(r'\,', '')
