@@ -351,7 +351,7 @@ async function doVerify() {
   document.getElementById('statusText').textContent = 'Verifying...';
 
   try {
-    const VERIFY_API = 'verify';
+    const VERIFY_API = 'notebook/verify';
     const resp = await fetch(VERIFY_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
