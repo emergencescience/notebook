@@ -107,6 +107,7 @@ async def parse_document(req: GenerateRequest):
 
 
 @app.post("/verify", response_model=VerifyResponse)
+@app.post("/notebook/verify", response_model=VerifyResponse)
 async def verify_content(req: VerifyRequest):
     """Verify LaTeX equations using SymPy. No LLM needed."""
     if not req.content.strip():
