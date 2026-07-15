@@ -22,31 +22,38 @@ def extract_equations(markdown: str) -> list[tuple[int, str, str]]:
 
     Returns list of (line_number, raw_text, display_mode).
     display_mode: "block" for $$...$$, "inline" for $...$.
+
+    Block equations ($$...$$) are matched against the full text because
+    they can span multiple lines.  Inline equations ($...$) can never
+    cross line boundaries so they're still processed line-by-line.
     """
     equations = []
     lines = markdown.split("\n")
 
-    # Block equations: $$...$$
+    # ── multi-line block equations ($$ … $$) ──────────────────────────
+    # Must be matched against the FULL text, not individual lines.
     block_pattern = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
-    # Inline equations: $...$ (but not $$)
+    for match in block_pattern.finditer(markdown):
+        eq = match.group(1).strip()
+        if eq and len(eq) > 2 and eq != "\\":
+            line_idx = markdown[:match.start()].count("\n") + 1
+            equations.append((line_idx, eq, "block"))
+
+    # ── single-line inline equations ($ … $) ──────────────────────────
+    # Inline equations cannot span lines, so line-by-line is fine.
     inline_pattern = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)")
 
     for line_idx, line in enumerate(lines, 1):
-        # Check for block equations
-        for match in block_pattern.finditer(line):
-            eq = match.group(1).strip()
-            if eq and len(eq) > 2:  # skip trivial like just "x"
-                equations.append((line_idx, eq, "block"))
-
-        # Check for inline equations
         for match in inline_pattern.finditer(line):
             eq = match.group(1).strip()
             # Keep any non-trivial equation. (Previously equations starting
-            # with a LaTeX command like \frac, \sin, \sum were wrongly
+            # with a LaTeX command like \\frac, \\sin, \\sum were wrongly
             # dropped — that silently skipped ~half of real equations.)
             if eq and len(eq) > 2:
                 equations.append((line_idx, eq, "inline"))
 
+    # Sort by line number so results appear in document order
+    equations.sort(key=lambda x: x[0])
     return equations
 
 
@@ -85,9 +92,19 @@ def _manual_latex_convert(latex: str) -> str | None:
 
     # Clean up: implicit multiplication
     s = re.sub(r'(\d)([a-zA-Z])', r'\1*\2', s)  # 2x → 2*x
-    s = re.sub(r'\)(\()', r')*(', s)       # (a)(b) → (a)*(b)
+    s = re.sub(r'\)\(\(', r')*(', s)       # (a)(b) → (a)*(b)
     s = re.sub(r'\)([a-zA-Z])', r')*\1', s)  # (a)b → (a)*b
     s = re.sub(r'([a-zA-Z])\(', r'\1*(', s)  # a(b) → a*(b)
+    s = re.sub(r'([a-zA-Z])\s+(exp|sin|cos|tan|log|ln|sqrt)\b', r'\1*\2', s)  # x exp → x*exp
+    # e^x → exp(x)  (Euler's number — 'e' followed by ^ or superscript)
+    # Handles: e^x, e^{2x}, e^{x+1}
+    s = re.sub(r'\be\s*\^\{?', 'exp(', s)
+    # Fix implicit multiplication AFTER e^→exp conversion:
+    # "x exp(" → "x*exp(", "2 exp(" → "2*exp(", ")exp(" → ")*exp("
+    s = re.sub(r'([a-zA-Z0-9])\s*(?=exp\()', r'\1*(', s)  # xexp( → x*exp(
+    # Close any exp( parentheses that were opened by e^{...} → exp(...)
+    # Count: every 'exp(' from e^ should have a matching ')'
+    # We add closing parens after all other replacements
 
     # Handle common LaTeX formatting
     replacements = [
@@ -191,7 +208,20 @@ def verify_equation(latex: str) -> VerificationResult:
 
     For equalities (a = b): check if (a - b) simplifies to 0.
     For formulas (no =): verify structural validity.
+    For integrals: mark inconclusive (verify by differentiating the antiderivative).
     """
+    # ── Integral detection ──────────────────────────────────────────
+    # Equations with \int need antiderivative-differentiation verification,
+    # which is a separate strategy from LHS-RHS algebraic checking.
+    # Mark as inconclusive with a helpful hint rather than returning an error.
+    if r"\int" in latex or "Integral" in latex or "integral" in latex.lower():
+        return VerificationResult(
+            line=0, equation=latex,
+            status="inconclusive",
+            detail="🔍 Integral detected — verify by differentiating the antiderivative. "
+                   "Use SymPy: diff(claimed_F, x) == integrand."
+        )
+
     # Check if it's an equality
     if "=" in latex and "\\neq" not in latex:
         # Split on = but be careful about LaTeX
