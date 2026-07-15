@@ -107,9 +107,18 @@ async def parse_document(req: GenerateRequest):
 
 
 @app.post("/verify", response_model=VerifyResponse)
-@app.post("/notebook/verify", response_model=VerifyResponse)
 async def verify_content(req: VerifyRequest):
     """Verify LaTeX equations using SymPy. No LLM needed."""
+    return await _do_verify(req)
+
+
+@app.post("/notebook/verify", response_model=VerifyResponse)
+async def verify_content_proxy(req: VerifyRequest):
+    """Alias for orchestrator proxy path /notebook/verify."""
+    return await _do_verify(req)
+
+
+async def _do_verify(req: VerifyRequest):
     if not req.content.strip():
         raise HTTPException(400, "No content provided")
 
