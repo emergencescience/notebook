@@ -65,6 +65,7 @@
   </div>
   <div class="actions">
     <button class="btn-secondary" onclick="loadDemo()">📥 Demo</button>
+    <button class="btn-secondary" id="verifyBtn" onclick="doVerify()">✅ Verify</button>
     <button class="btn-primary" id="generateBtn" onclick="doGenerate()">⚡ Generate</button>
   </div>
 </header>
@@ -91,6 +92,7 @@ The AI will replace these comments with generated content."></textarea>
   <div class="pane">
     <div class="pane-header">👁️ Preview</div>
     <div id="preview"><em style="color:#334155;">Click Generate to see results...</em></div>
+    <div id="verifyResults" style="display:none; padding:12px; border-top:1px solid #1e293b; background:#13151a; max-height:200px; overflow-y:auto; font-size:12px;"></div>
     <div class="stats" id="stats">
       <span>📊 Blocks: <strong id="blocksCount">0</strong></span>
       <span>📝 Items: <strong id="itemsCount">0</strong></span>
@@ -333,6 +335,58 @@ function generateComputeQuestions(n) {
     out += `**Q${i+1}:** ${pool[i][0]}\n\n**A${i+1}:** ${pool[i][1]} <span class="badge badge-ok">SymPy ✓</span>\n\n`;
   }
   return out;
+}
+
+
+async function doVerify() {
+  const btn = document.getElementById('verifyBtn');
+  const text = document.getElementById('editor').value;
+  const panel = document.getElementById('verifyResults');
+
+  if (!text.trim()) return;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Verifying...';
+  document.getElementById('statusDot').className = 'dot dot-yellow';
+  document.getElementById('statusText').textContent = 'Verifying...';
+
+  try {
+    const VERIFY_API = 'notebook/verify';
+    const resp = await fetch(VERIFY_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const data = await resp.json();
+
+    panel.style.display = 'block';
+    panel.innerHTML = '<div style="font-weight:700;color:#a78bfa;margin-bottom:8px;">🔍 Verification Results</div>'
+      + '<div style="color:#94a3b8;margin-bottom:4px;">' + data.summary + '</div>';
+
+    if (data.results && data.results.length > 0) {
+      data.results.forEach(r => {
+        const color = r.status === 'verified' ? '#4ade80' : r.status === 'error' ? '#f87171' : '#fbbf24';
+        const icon = r.status === 'verified' ? '✅' : r.status === 'error' ? '❌' : '⚠️';
+        panel.innerHTML += '<div style="padding:4px 0;border-bottom:1px solid #1e293b;">'
+          + '<span style="color:' + color + ';">' + icon + ' Line ' + r.line + '</span> '
+          + '<code style="color:#cbd5e1;">' + r.equation.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</code>'
+          + '<div style="color:#64748b;font-size:11px;">' + r.detail + '</div>'
+          + '</div>';
+      });
+    }
+
+    document.getElementById('statusDot').className = 'dot dot-green';
+    document.getElementById('statusText').textContent = 'Verified';
+  } catch (e) {
+    panel.style.display = 'block';
+    panel.innerHTML = '<div style="color:#f87171;">❌ Verification failed: ' + e.message + '</div>';
+    document.getElementById('statusText').textContent = 'Error';
+    document.getElementById('statusDot').className = 'dot';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '✅ Verify';
+  }
 }
 
 // Init
