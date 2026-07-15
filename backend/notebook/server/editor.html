@@ -66,6 +66,7 @@
   <div class="actions">
     <button class="btn-secondary" onclick="loadDemo()">📥 Demo</button>
     <button class="btn-secondary" id="verifyBtn" onclick="doVerify()">✅ Verify</button>
+    <button class="btn-secondary" id="exportBtn" onclick="doExport('simple')" title="Download as Python script">📥 .py</button>
     <button class="btn-primary" id="generateBtn" onclick="doGenerate()">⚡ Generate</button>
   </div>
 </header>
@@ -386,6 +387,50 @@ async function doVerify() {
   } finally {
     btn.disabled = false;
     btn.textContent = '✅ Verify';
+  }
+}
+
+async function doExport(format) {
+  const btn = document.getElementById('exportBtn');
+  const text = document.getElementById('editor').value;
+
+  if (!text.trim()) return;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Exporting...';
+
+  try {
+    const EXPORT_API = 'notebook/export';
+    const resp = await fetch(EXPORT_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text, format: format }),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || 'Export failed');
+    }
+
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'verify.py';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    document.getElementById('statusText').textContent = 'Exported verify.py';
+    document.getElementById('statusDot').className = 'dot dot-green';
+  } catch (e) {
+    document.getElementById('statusText').textContent = 'Export error: ' + e.message;
+    document.getElementById('statusDot').className = 'dot';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📥 .py';
   }
 }
 

@@ -11,12 +11,12 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from notebook.teach.generator import generate, parse_ai_blocks
-from notebook.verify import verify_document, VerificationResult
+from notebook.verify import verify_document, VerificationResult, generate_script
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("veriteach.server")
 
-app = FastAPI(title="VeriTeach", version="0.1.0")
+app = FastAPI(title="VeriTeach", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +52,11 @@ class VerifyResponse(BaseModel):
     equations_found: int
     results: list[dict]
     summary: str
+
+
+class ExportRequest(BaseModel):
+    content: str
+    format: str = "simple"  # "simple" or "unittest"
 
 
 class HealthResponse(BaseModel):
@@ -141,9 +146,37 @@ async def _do_verify(req: VerifyRequest):
         results=[{
             "line": r.line, "equation": r.equation,
             "status": r.status, "detail": r.detail,
+            "checks": r.checks,
         } for r in results],
         summary=summary,
     )
+
+
+@app.post("/export")
+async def export_script(req: ExportRequest):
+    """Generate a downloadable SymPy verification script."""
+    if not req.content.strip():
+        raise HTTPException(400, "No content provided")
+
+    results = verify_document(req.content)
+    if not results:
+        raise HTTPException(400, "No equations found to export")
+
+    fmt = req.format if req.format in ("simple", "unittest") else "simple"
+    script = generate_script(results, format=fmt, title="VeriTeach Export")
+
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        content=script,
+        media_type="text/x-python",
+        headers={"Content-Disposition": "attachment; filename=verify.py"},
+    )
+
+
+@app.post("/notebook/export")
+async def export_script_proxy(req: ExportRequest):
+    """Alias for orchestrator proxy path /notebook/export."""
+    return await export_script(req)
 
 
 @app.get("/", response_class=HTMLResponse)
