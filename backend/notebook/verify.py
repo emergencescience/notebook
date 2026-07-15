@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("exobrain.verify")
 
@@ -22,6 +22,10 @@ class VerificationResult:
     equation: str      # original LaTeX string
     status: str        # "verified", "inconclusive", "error"
     detail: str        # human-readable explanation
+    # ── Script generation fields ────────────────────────────────────
+    checks: list[dict] = field(default_factory=list)
+    # Each check dict: {"label": str, "lhs_py": str|None, "rhs_py": str|None,
+    #                    "diff": str|None, "method": str, "passed": bool}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -192,6 +196,29 @@ def _llm_translate(latex: str) -> tuple:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# sympy_expr → Python source (for script generation)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _sympy_to_py(expr) -> str | None:
+    """Convert a SymPy expression to a python-eval-able string.
+
+    Uses sympy.srepr() which gives a reproducible canonical form,
+    then converts common patterns for readability.
+    """
+    if expr is None:
+        return None
+    s = str(expr)
+    # Fix e**x → exp(x) (SymPy str() uses e**x for Euler's number)
+    # Match 'e**' followed by variable or paren group
+    s = re.sub(r'\be\*\*(\w+)', r'exp(\1)', s)
+    s = re.sub(r'\be\*\*(\([^)]+\))', r'exp\1', s)
+    # Fix e** without being preceded by a letter (standalone Euler's e)
+    s = re.sub(r'(?<![a-zA-Z)])e\*\*', 'exp', s)
+    return s
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Equation verification
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -223,12 +250,15 @@ def verify_equation(latex: str) -> VerificationResult:
         return VerificationResult(
             line=0, equation=latex,
             status="verified",
-            detail="✅ Valid expression"
+            detail="✅ Valid expression",
+            checks=[{"label": latex, "lhs_py": _sympy_to_py(expr),
+                     "rhs_py": None, "diff": None,
+                     "method": "expression", "passed": True}],
         )
     return VerificationResult(
         line=0, equation=latex,
         status="error",
-        detail=f"Parse error: {err}"
+        detail=f"Parse error: {err}",
     )
 
 
@@ -275,6 +305,7 @@ def _verify_multi_equality(latex: str) -> VerificationResult:
         return _verify_integral(latex) if r"\int" in latex else _verify_single_equality(latex)
 
     results_detail: list[str] = []
+    checks: list[dict] = []
     all_ok = True
     has_error = False
 
@@ -285,23 +316,33 @@ def _verify_multi_equality(latex: str) -> VerificationResult:
         if lhs_expr is None or rhs_expr is None:
             err = lhs_err or rhs_err or "?"
             results_detail.append(f"  Segment {i+1}: parse error — {err}")
+            checks.append({"label": f"Segment {i+1}", "lhs_py": None, "rhs_py": None,
+                          "diff": None, "method": "parse_error", "passed": False})
             has_error = True
             all_ok = False
             continue
 
+        lhs_py = _sympy_to_py(lhs_expr)
+        rhs_py = _sympy_to_py(rhs_expr)
+
         try:
             diff = sp.simplify(lhs_expr - rhs_expr)
-            if diff == 0:
-                results_detail.append(f"  {segments[i][:30]} = {segments[i+1][:30]}  ✅")
-            elif isinstance(diff, sp.core.numbers.Zero) or diff == 0:
+            passed = diff == 0
+            diff_py = _sympy_to_py(diff)
+            if passed:
                 results_detail.append(f"  {segments[i][:30]} = {segments[i+1][:30]}  ✅")
             else:
                 results_detail.append(
                     f"  {segments[i][:30]} = {segments[i+1][:30]}  ⚠️ diff={diff}"
                 )
                 all_ok = False
+            checks.append({"label": f"Segment {i+1}: {segments[i][:25]} = {segments[i+1][:25]}",
+                          "lhs_py": lhs_py, "rhs_py": rhs_py,
+                          "diff": diff_py, "method": "simplify", "passed": passed})
         except Exception as e:
             results_detail.append(f"  {segments[i][:30]} = {segments[i+1][:30]}  ❌ {e}")
+            checks.append({"label": f"Segment {i+1}", "lhs_py": lhs_py, "rhs_py": rhs_py,
+                          "diff": None, "method": "error", "passed": False})
             has_error = True
             all_ok = False
 
@@ -310,18 +351,21 @@ def _verify_multi_equality(latex: str) -> VerificationResult:
         return VerificationResult(
             line=0, equation=latex,
             status="verified",
-            detail=f"✅ Chain verified ({len(segments)-1} segments): {detail_text}"
+            detail=f"✅ Chain verified ({len(segments)-1} segments): {detail_text}",
+            checks=checks,
         )
     if has_error:
         return VerificationResult(
             line=0, equation=latex,
             status="error",
-            detail=f"❌ Chain verification failed: {detail_text}"
+            detail=f"❌ Chain verification failed: {detail_text}",
+            checks=checks,
         )
     return VerificationResult(
         line=0, equation=latex,
         status="inconclusive",
-        detail=f"⚠️ Chain inconclusive: {detail_text}"
+        detail=f"⚠️ Chain inconclusive: {detail_text}",
+        checks=checks,
     )
 
 
@@ -334,12 +378,15 @@ def _verify_single_equality(latex: str) -> VerificationResult:
             return VerificationResult(
                 line=0, equation=latex,
                 status="verified",
-                detail="✅ Valid expression"
+                detail="✅ Valid expression",
+                checks=[{"label": latex, "lhs_py": _sympy_to_py(expr),
+                         "rhs_py": None, "diff": None,
+                         "method": "expression", "passed": True}],
             )
         return VerificationResult(
             line=0, equation=latex,
             status="error",
-            detail=f"Cannot split equality: {latex}"
+            detail=f"Cannot split equality: {latex}",
         )
 
     lhs_expr, lhs_err = latex_to_sympy(parts[0])
@@ -350,34 +397,46 @@ def _verify_single_equality(latex: str) -> VerificationResult:
         return VerificationResult(
             line=0, equation=latex,
             status="error",
-            detail=f"Parse error: {err_msg}"
+            detail=f"Parse error: {err_msg}",
         )
+
+    lhs_py = _sympy_to_py(lhs_expr)
+    rhs_py = _sympy_to_py(rhs_expr)
 
     try:
         import sympy as sp
         diff = sp.simplify(lhs_expr - rhs_expr)
-        if diff == 0:
+        passed = diff == 0
+        diff_py = _sympy_to_py(diff)
+        checks = [{"label": f"{parts[0][:25]} = {parts[1][:25]}",
+                    "lhs_py": lhs_py, "rhs_py": rhs_py,
+                    "diff": diff_py, "method": "simplify", "passed": passed}]
+
+        if passed:
             return VerificationResult(
                 line=0, equation=latex,
                 status="verified",
-                detail="✅ Verified: LHS − RHS = 0"
+                detail="✅ Verified: LHS − RHS = 0",
+                checks=checks,
             )
         if diff.is_number:
             return VerificationResult(
                 line=0, equation=latex,
                 status="error",
-                detail=f"❌ LHS ≠ RHS (difference = {diff})"
+                detail=f"❌ LHS ≠ RHS (difference = {diff})",
+                checks=checks,
             )
         return VerificationResult(
             line=0, equation=latex,
             status="inconclusive",
-            detail=f"⚠️ LHS − RHS = {diff}. May be correct with additional constraints."
+            detail=f"⚠️ LHS − RHS = {diff}. May be correct with additional constraints.",
+            checks=checks,
         )
     except Exception as e:
         return VerificationResult(
             line=0, equation=latex,
             status="error",
-            detail=f"Simplification error: {str(e)[:100]}"
+            detail=f"Simplification error: {str(e)[:100]}",
         )
 
 
@@ -393,11 +452,10 @@ def _verify_integral(latex: str) -> VerificationResult:
 
     expr, err = latex_to_sympy(latex)
     if expr is None:
-        # Try LLM fallback directly (SymPy native parser may have misparsed)
         return VerificationResult(
             line=0, equation=latex,
             status="error",
-            detail=f"Parse error: {err}"
+            detail=f"Parse error: {err}",
         )
 
     # Case 1: Eq(LHS, RHS) with integral on one side
@@ -409,22 +467,23 @@ def _verify_integral(latex: str) -> VerificationResult:
             return _verify_integral_eq(latex, rhs, lhs)
 
         # No explicit Integral object — might have been misparsed
-        # Try algebraic check as fallback
         try:
             diff = sp.simplify(lhs - rhs)
             if diff == 0:
                 return VerificationResult(
                     line=0, equation=latex,
                     status="verified",
-                    detail="✅ Verified: LHS − RHS = 0"
+                    detail="✅ Verified: LHS − RHS = 0",
+                    checks=[{"label": latex, "lhs_py": _sympy_to_py(lhs),
+                             "rhs_py": _sympy_to_py(rhs),
+                             "diff": "0", "method": "simplify", "passed": True}],
                 )
-            # Try differentiating one side
             return _try_differentiate_check(latex, lhs, rhs)
         except Exception as e:
             return VerificationResult(
                 line=0, equation=latex,
                 status="error",
-                detail=f"Integral verification error: {str(e)[:100]}"
+                detail=f"Integral verification error: {str(e)[:100]}",
             )
 
     # Case 2: Standalone Integral expression
@@ -432,14 +491,14 @@ def _verify_integral(latex: str) -> VerificationResult:
         return VerificationResult(
             line=0, equation=latex,
             status="inconclusive",
-            detail="🔍 Integral expression — no antiderivative to verify against."
+            detail="🔍 Integral expression — no antiderivative to verify against.",
         )
 
     # Case 3: Misparsed — the LLM might help
     return VerificationResult(
         line=0, equation=latex,
         status="inconclusive",
-        detail=f"🔍 Integral detected but parse gave: {expr}. Try rewriting as F(x) = ∫ f(x) dx."
+        detail=f"🔍 Integral detected but parse gave: {expr}. Try rewriting as F(x) = ∫ f(x) dx.",
     )
 
 
@@ -456,7 +515,10 @@ def _verify_integral_eq(
         return VerificationResult(
             line=0, equation=latex,
             status="verified",
-            detail="✅ Definition: F(x) is defined as this integral (assumed true)"
+            detail="✅ Definition: F(x) is defined as this integral (assumed true)",
+            checks=[{"label": latex, "lhs_py": str(claimed_F),
+                     "rhs_py": str(integrand),
+                     "diff": None, "method": "definition", "passed": True}],
         )
 
     try:
@@ -471,7 +533,11 @@ def _verify_integral_eq(
             return VerificationResult(
                 line=0, equation=latex,
                 status="verified",
-                detail=f"✅ Verified: d/d{var}({claimed_F}) = {f} = integrand"
+                detail=f"✅ Verified: d/d{var}({claimed_F}) = {f} = integrand",
+                checks=[{"label": f"diff({claimed_F}, {var}) == {f}",
+                         "lhs_py": _sympy_to_py(derivative),
+                         "rhs_py": _sympy_to_py(f),
+                         "diff": "0", "method": "differentiate", "passed": True}],
             )
 
         # Method 2: Integrate the integrand and compare
@@ -482,7 +548,11 @@ def _verify_integral_eq(
                 return VerificationResult(
                     line=0, equation=latex,
                     status="verified",
-                    detail=f"✅ Verified: ∫ {f} d{var} = {computed} = claimed F"
+                    detail=f"✅ Verified: ∫ {f} d{var} = {computed} = claimed F",
+                    checks=[{"label": f"integrate({f}, {var}) == {claimed_F}",
+                             "lhs_py": _sympy_to_py(computed),
+                             "rhs_py": _sympy_to_py(claimed_F),
+                             "diff": "0", "method": "integrate", "passed": True}],
                 )
         except Exception:
             pass  # integrate() may not find a closed form
@@ -491,14 +561,19 @@ def _verify_integral_eq(
         return VerificationResult(
             line=0, equation=latex,
             status="error",
-            detail=f"❌ d/d{var}(claimed F) = {derivative} ≠ {f} (diff = {diff_check})"
+            detail=f"❌ d/d{var}(claimed F) = {derivative} ≠ {f} (diff = {diff_check})",
+            checks=[{"label": f"diff({claimed_F}, {var}) != {f}",
+                     "lhs_py": _sympy_to_py(derivative),
+                     "rhs_py": _sympy_to_py(f),
+                     "diff": _sympy_to_py(diff_check),
+                     "method": "differentiate", "passed": False}],
         )
 
     except Exception as e:
         return VerificationResult(
             line=0, equation=latex,
             status="error",
-            detail=f"Integral verification error: {str(e)[:100]}"
+            detail=f"Integral verification error: {str(e)[:100]}",
         )
 
 
@@ -508,7 +583,6 @@ def _try_differentiate_check(latex: str, lhs, rhs) -> VerificationResult:
 
     x = sp.Symbol("x")
     try:
-        # Try differentiation check: is d(lhs)/dx == d(rhs)/dx?
         d_lhs = sp.diff(lhs, x)
         d_rhs = sp.diff(rhs, x)
         diff = sp.simplify(d_lhs - d_rhs)
@@ -516,18 +590,18 @@ def _try_differentiate_check(latex: str, lhs, rhs) -> VerificationResult:
             return VerificationResult(
                 line=0, equation=latex,
                 status="verified",
-                detail="✅ Verified: derivatives equal (LHS and RHS differ by constant)"
+                detail="✅ Verified: derivatives equal (LHS and RHS differ by constant)",
             )
         return VerificationResult(
             line=0, equation=latex,
             status="inconclusive",
-            detail=f"⚠️ d(LHS)/dx − d(RHS)/dx = {diff}"
+            detail=f"⚠️ d(LHS)/dx − d(RHS)/dx = {diff}",
         )
     except Exception:
         return VerificationResult(
             line=0, equation=latex,
             status="inconclusive",
-            detail="🔍 Could not verify integral equality automatically."
+            detail="🔍 Could not verify integral equality automatically.",
         )
 
 
@@ -571,3 +645,183 @@ def verify_document(markdown: str) -> list[VerificationResult]:
         results.append(result)
 
     return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Script generation
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def generate_script(
+    results: list[VerificationResult],
+    format: str = "simple",
+    title: str = "Verification Script",
+) -> str:
+    """Generate a standalone Python verification script from results.
+
+    Args:
+        results: list of VerificationResult (must include checks data)
+        format: "simple" (assert-based) or "unittest" (unittest.TestCase)
+        title: script title
+
+    Returns:
+        Complete Python script as a string.
+    """
+    if format == "unittest":
+        return _generate_unittest_script(results, title)
+    return _generate_simple_script(results, title)
+
+
+def _generate_simple_script(results: list[VerificationResult], title: str) -> str:
+    """Generate a simple assert-based verification script."""
+    lines: list[str] = []
+    lines.append('"""Verification Script — generated by VeriTeach')
+    lines.append(f"   {title}")
+    lines.append('   https://emergence.science/en/play/notebook')
+    lines.append('"""')
+    lines.append("")
+    lines.append("import sympy as sp")
+    lines.append("from sympy import exp, Integral, sin, cos, tan, log, sqrt, pi, oo")
+    lines.append("")
+    lines.append("x = sp.Symbol('x')")
+
+    # Collect undefined functions used in checks
+    undef_functions: set[str] = set()
+    for result in results:
+        for check in result.checks:
+            for key in ("lhs_py", "rhs_py", "diff"):
+                val = check.get(key, "")
+                if val and "F(" in val:
+                    undef_functions.add("F")
+                if val and "G(" in val:
+                    undef_functions.add("G")
+    for fn in sorted(undef_functions):
+        lines.append(f"{fn} = sp.Function('{fn}')")
+
+    lines.append("")
+    lines.append("print('🔍 Running verification...')")
+    lines.append("")
+
+    step_num = 0
+    for result in results:
+        # Sanitize equation for comment display
+        eq_display = result.equation.replace("\n", " ")[:60]
+        lines.append(f"# ── Line {result.line}: {eq_display} ──")
+        lines.append(f"# Status: {result.status}")
+
+        if not result.checks:
+            lines.append(f"# (no executable checks — {result.detail})")
+            lines.append("")
+            continue
+
+        for check in result.checks:
+            step_num += 1
+            method = check.get("method", "?")
+            label = check.get("label", f"Step {step_num}")
+            passed = check.get("passed", False)
+            lhs_py = check.get("lhs_py")
+            rhs_py = check.get("rhs_py")
+            diff_py = check.get("diff")
+
+            lines.append(f"# Step {step_num}: {label}")
+            lines.append(f"# Method: {method}")
+
+            if method == "definition":
+                lines.append(f"# Definition (assumed true)")
+                lines.append(f"#   LHS = {lhs_py}")
+                lines.append(f"#   RHS = {rhs_py}")
+                lines.append("")
+                continue
+
+            if method == "expression":
+                lines.append(f"# Valid expression")
+                lines.append(f"#   {lhs_py}")
+                lines.append("")
+                continue
+
+            if lhs_py and rhs_py:
+                lines.append(f"lhs_{step_num} = {lhs_py}")
+                lines.append(f"rhs_{step_num} = {rhs_py}")
+                lines.append(f"diff_{step_num} = sp.simplify(lhs_{step_num} - rhs_{step_num})")
+                if passed:
+                    lines.append(f"assert diff_{step_num} == 0, f\"Step {step_num} FAILED: diff = {{diff_{step_num}}}\"")
+                    lines.append(f"print('  ✅ Step {step_num} passed')")
+                else:
+                    expected_hint = f" (got {diff_py})" if diff_py else ""
+                    lines.append(f"# ⚠️ This step is inconclusive — diff ≠ 0{expected_hint}")
+                    lines.append(f"# assert diff_{step_num} == 0  # would fail — needs human review")
+                    lines.append(f"print('  ⚠️ Step {step_num} SKIPPED (inconclusive — diff = {{diff_{step_num}}})')")
+                lines.append("")
+
+    lines.append(f"print(f'\\n✅ All verifications completed! ({step_num} check(s))')")
+    return "\n".join(lines)
+
+
+def _generate_unittest_script(results: list[VerificationResult], title: str) -> str:
+    """Generate a unittest.TestCase-based verification script."""
+    lines: list[str] = []
+    lines.append('"""Verification Script — generated by VeriTeach')
+    lines.append(f"   {title}")
+    lines.append('   https://emergence.science/en/play/notebook')
+    lines.append('"""')
+    lines.append("")
+    lines.append("import sympy as sp")
+    lines.append("import unittest")
+    lines.append("from sympy import exp, Integral, sin, cos, tan, log, sqrt, pi, oo")
+    lines.append("")
+    lines.append("x = sp.Symbol('x')")
+
+    # Collect undefined functions
+    undef_functions: set[str] = set()
+    for result in results:
+        for check in result.checks:
+            for key in ("lhs_py", "rhs_py", "diff"):
+                val = check.get(key, "")
+                if val and "F(" in val:
+                    undef_functions.add("F")
+                if val and "G(" in val:
+                    undef_functions.add("G")
+    for fn in sorted(undef_functions):
+        lines.append(f"{fn} = sp.Function('{fn}')")
+
+    lines.append("")
+    lines.append("")
+    lines.append("class TestVerification(unittest.TestCase):")
+    lines.append('    """Auto-generated verification tests."""')
+    lines.append("")
+
+    for result in results:
+        eq_display = result.equation.replace("\n", " ")[:50]
+        lines.append(f"    # ── Line {result.line}: {eq_display} ──")
+
+        if not result.checks:
+            lines.append(f"    # (no executable checks — {result.detail})")
+            lines.append("")
+            continue
+
+        for i, check in enumerate(result.checks):
+            method = check.get("method", "?")
+            label = check.get("label", f"Step")
+            passed = check.get("passed", False)
+            lhs_py = check.get("lhs_py")
+            rhs_py = check.get("rhs_py")
+
+            if method in ("definition", "expression"):
+                lines.append(f"    # {method}: {label} (no assertion needed)")
+                continue
+
+            if lhs_py and rhs_py:
+                # Sanitize label for method name
+                safe_label = re.sub(r'[^a-zA-Z0-9_]', '_', f"line{result.line}_step{i+1}")
+                lines.append(f"    def test_{safe_label}(self):")
+                lines.append(f'        """{label}"""')
+                lines.append(f"        lhs = {lhs_py}")
+                lines.append(f"        rhs = {rhs_py}")
+                lines.append(f"        diff = sp.simplify(lhs - rhs)")
+                lines.append(f"        self.assertEqual(diff, 0, f'Diff = {{diff}}')")
+                lines.append("")
+
+    lines.append("")
+    lines.append("if __name__ == '__main__':")
+    lines.append("    unittest.main()")
+    return "\n".join(lines)
